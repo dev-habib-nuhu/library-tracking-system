@@ -5,14 +5,19 @@ from .serializers import AuthorSerializer, BookSerializer, MemberSerializer, Loa
 from rest_framework.decorators import action
 from django.utils import timezone
 from .tasks import send_loan_notification
+from datetime import timedelta
+from rest_framework.pagination import PageNumberPagination
+from django.db.models import Count, Q
+
 
 class AuthorViewSet(viewsets.ModelViewSet):
     queryset = Author.objects.all()
     serializer_class = AuthorSerializer
 
 class BookViewSet(viewsets.ModelViewSet):
-    queryset = Book.objects.all()
+    queryset = Book.objects.select_related('author').all().order_by('id')
     serializer_class = BookSerializer
+    pagination_class = PageNumberPagination
 
     @action(detail=True, methods=['post'])
     def loan(self, request, pk=None):
@@ -49,6 +54,28 @@ class MemberViewSet(viewsets.ModelViewSet):
     queryset = Member.objects.all()
     serializer_class = MemberSerializer
 
+    @action(detail=False, methods=['get'])
+    def top_active(self, request):
+        active_loans = Count('loans', filter=Q(loans__is_returned=False))
+        members = Member.objects.annotate(active_loans_count=active_loans).order_by('-active_loans_count')[:5]
+        return Response(MemberSerializer(members, many=True).data)
+
+
 class LoanViewSet(viewsets.ModelViewSet):
     queryset = Loan.objects.all()
     serializer_class = LoanSerializer
+
+    @action(detail=True, methods=['post'])
+    def extend_due_date(self, request, pk=None):
+        loan = self.get_object()
+        today = timezone.now().date()
+        if loan.due_date < today:
+            return Response({'message': 'Loan is already overdue'}, status=status.HTTP_400_BAD_REQUEST)
+        additional_days = int(request.data.get('additional_days',0))
+
+        if additional_days < 1:
+            return Response({'message': 'Invalid additional days'}, status=status.HTTP_400_BAD_REQUEST)
+        
+        loan.due_date = loan.due_date + timedelta(days=additional_days)
+        loan.save()
+        return Response(LoanSerializer(loan).data)
